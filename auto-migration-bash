@@ -1,0 +1,149 @@
+```
+#!/bin/bash
+
+# Created by: Hananto Wicaksono
+# Master Principal Solution Engineer, Oracle MySQL GBU
+# Singapore, 1 Oct 2022
+
+ocimds="true"
+showProgress="true"
+consistent="false"
+compatibility="force_innodb,skip_invalid_accounts,strip_tablespaces,strip_restricted_grants,strip_definers,ignore_missing_pks"
+
+echo -e "\033[1;33mMySQL DATABASE MIGRATION TOOL TO MDS \033[0m"
+echo -e "\033[1;33version 1.0.0 \033[0m"
+echo -e "\033[0;35mCreated by: Hananto Wicaksono \033[0m"
+echo " "
+echo -e "\033[1;32mSetup Connection Parameter to MySQL Source\033[0m"
+
+read -p "Backup Admin User [default: root] = " backupAdmin
+if [ "$backupAdmin" = "" ]; then backupAdmin="root"; fi;
+
+read -p "Backup Admin Password [default: Root_123] = " backupAdminPassword
+if [ "$backupAdminPassword" = "" ]; then backupAdminPassword="Root_123"; fi;
+
+read -p "MySQL Host/IP [default: localhost] = " mysqlhost
+if [ "$mysqlhost" = "" ]; then mysqlhost="localhost"; fi;
+
+read -p "MySQL Port [default: 3306] = " mysqlport
+if [ "$mysqlport" = "" ]; then mysqlport=3306; fi;
+
+echo " "
+echo "Gather database size:"
+mysql -u$backupAdmin -p$backupAdminPassword -h$mysqlhost -P$mysqlport -e "select round(SUM(data_length)/1024/1024/1024,1) 'DB size in GB' from information_schema.tables"
+
+echo " "
+
+echo -e "\033[1;32mSetup Target Object Storage Bucket\033[0m"
+
+read -p "OCI config file [default:/home/opc/.oci/config ] = " ociconfig
+if [ "$ociconfig" == "" ]; then ociconfig="/home/opc/.oci/config"; fi;
+
+osCompartment=`cat $ociconfig  | grep compartment | sed 's/=/ /g' | awk '{print $2}'`
+read -p "Target Compartment OCID [default:$osCompartment ] = " vCompartment
+if [ "$vCompartment" != "" ]; then osCompartment=$vCompartment; fi;
+
+ociregion=`cat /home/opc/.oci/config  | grep region | sed 's/\=/ /g' | awk '{print $2}'`
+read -p "Target OCI region [default:$ociregion ] = " vociregion
+if [ "$vociregion" != "" ]; then ociregion=$vociregion; fi;
+
+read -p "Target OCI Namespace [default: idazzjlcjqzj] = " osNamespace
+if [ "$osNamespace" = "" ]; then osNamespace="idazzjlcjqzj"; fi;
+
+read -p "Target OCI Bucket Name [default: toffs] = " osBucketName
+if [ "$osBucketName" = "" ]; then osBucketName="toffs"; fi;
+
+echo -e "\033[0;31mThis warning / error message - if any - is due to Python version used by OS"
+echo    "-----------------------------------------------------------------------------------"
+checkBucket=`oci os bucket list --compartment-id=$osCompartment --namespace=$osNamespace --region=$ociregion | grep $osBucketName | wc -l`
+if [ $checkBucket -lt 1 ]; then createBucket="1"; else createBucket="0"; fi
+
+echo -e "\033[0;31mThis warning / error message - if any - is due to Python version used by OS"
+echo    "-----------------------------------------------------------------------------------"
+
+if [ "$createBucket" = "1" ]; then
+        echo "Create bucket $osBucketName in compartment $osCompartment"
+	oci os bucket create --compartment-id=$osCompartment --name=$osBucketName --region=$ociregion > /dev/null
+        echo " "
+else
+	echo "Bulk-delete bucket $osBucketName in compartment $osCompartment"
+        oci os bucket delete --bucket-name=$osBucketName --force --empty --region=$ociregion > /dev/null
+	oci os bucket create --compartment-id=$osCompartment --name=$osBucketName --region=$ociregion > /dev/null
+        echo " "
+fi
+echo -e "Bucket $osBucketName is ready in compartment $osCompartment \033[0m"
+
+echo " "
+
+echo -e "\033[1;32mSetup Connection Parameter to Target MySQL\033[0m"
+
+read -p "Do you want to create target MDS (Y|N) [default: Y] = " createMDS
+if [ "$createMDS" != "" ] && [ "$createMDS" != "Y" ]; then createMDS="N"; else createMDS="Y"; fi;
+if [ "$createMDS" = "Y" ]; then
+	PARexpiry="2022-11-15T20:30:00.123Z"
+        read -p "Target PAR link expiry [default: $PARexpiry] = " vPARexpiry
+        if [ "$vPARexpiry" = "" ]; then PARexpiry=$PARexpiry; fi;
+	read -p "Admin UserName: " vUserName
+        read -p "Admin User Password: " vPassword
+        read -p "MDS Display Name: " vDisplayName
+	echo -e "Default Subnet OCID is \033[0;31mocid1.subnet.oc1.ap-singapore-1.aaaaaaaas6mv7etymi3r3d4wnxcl5svpwmids3c5vbegqqythovcbrzcscqq\033[0m"
+	read -p "Target Subnet OCID (enter for default): " vSubnet
+        if [ "$vSubnet" = "" ]; then vSubnet="ocid1.subnet.oc1.ap-singapore-1.aaaaaaaas6mv7etymi3r3d4wnxcl5svpwmids3c5vbegqqythovcbrzcscqq"; fi
+	echo -e "Default Availability Domain is \033[0;31mYOiV:AP-SINGAPORE-1-AD-1\033[0m" 
+        read -p "Target Availability Domain (enter for default): " vAD
+        if [ "$vAD" = "" ]; then vAD="YOiV:AP-SINGAPORE-1-AD-1"; fi
+        echo -e "Default MDS Shape is \033[0;31MySQL.VM.Standard3.32.512GB\033[0m"
+	read -p "Target MDS Shape: " vShape
+	if [ "$vShape" = "" ]; then vShape="MySQL.VM.Standard3.32.512GB"; fi
+	echo -e "Default MDS Storage size is \033[0;31m50 GB\033[0m"
+	read -p "Target Storage Size (enter for default): " vStorageSize
+	if [ "$vStorageSize" = "" ]; then vStorageSize="50"; fi
+
+else
+	read -p "Admin UserName: " vUserName
+	read -p "Admin User Password: " vPassword
+        read -p "Target MySQL host/IP: " vhost
+	read -p "Target MySQL Port: " vPort
+	echo -e "\033[0;31mmysqlsh $vUserName:"$vPassword"@$vhost:$vPort -- util loadDump \"\" --threads=`lscpu -p | grep -v \# | wc -l` --osBucketName=$osBucketName --osNamespace=$osNamespace\033[0m"
+fi
+echo " "
+read -p "Dry Run ? [default: true] = " dryRun
+if [ "$dryRun" = "" ]; then dryRun="true"; fi;
+
+echo -e "\033[1;32mStart Backup on the background "
+
+echo "Backup command: "
+echo "mysqlsh $backupAdmin:$backupAdminPassword@$mysqlhost:$mysqlport -- util dumpInstance \"\" --osBucketName=$osBucketName --osNamespace=$osNamespace --dryRun=$dryRun --ocimds=$ocimds --showProgress=$showProgress --threads=`lscpu -p | grep -v \# | wc -l` --consistent=$consistent --compatibility=$compatibility"
+echo " "
+read -n 1 -s -r -p "Press any key to continue ..."
+
+cat /dev/null > $HOME/.mysqlsh/mysqlsh.log 
+
+mysqlsh $backupAdmin:$backupAdminPassword@$mysqlhost:$mysqlport -- util dumpInstance "" --osBucketName=$osBucketName --osNamespace=$osNamespace --dryRun=$dryRun --ocimds=$ocimds --showProgress=$showProgress --threads=`lscpu -p | grep -v \# | wc -l` --consistent=$consistent --compatibility=$compatibility &  
+
+echo -e "\033[0;31mCheck bucket $osBucketName for @.json file"
+echo "oci os object list --bucket-name $osBucketName --region=$ociregion --namespace=$osNamespace | grep \"@.json\" | wc -l"
+i=`oci os object list --bucket-name $osBucketName --region=$ociregion --namespace=$osNamespace | grep "@.json" | wc -l`
+while [ $i -eq 0 ]
+do
+  i=`oci os object list --bucket-name $osBucketName --region=$ociregion --namespace=$osNamespace | grep "@.json" | wc -l`
+done
+
+echo -e "\033[0;31mFile @.json file exist. Start provisioning MDS \033[0m"
+
+if [ "$vDisplayName" != "" ]; then
+ 	
+        echo -e "\033[0;31mThis warning / error message - if any - is due to Python version used by OS"
+        echo    "-----------------------------------------------------------------------------------"
+        oci os preauth-request create --access-type=AnyObjectRead --bucket-listing-action=ListObjects --namespace=$osNamespace --name="/" --bucket-name=$osBucketName --time-expires=$PARexpiry | grep access-uri | sed 's/\"//g' | sed 's/\,//g' | awk '{print $2}' > /tmp/par_link_$osBucketName
+        par_link_partial=`cat /tmp/par_link_$osBucketName`
+        echo " "
+        full_par_link=`echo "https://objectstorage.$ociregion.oraclecloud.com$par_link_partial"`
+        echo "PAR link URL = $full_par_link"
+        echo -e "\033[0m"
+
+        echo "oci mysql db-system create --compartment-id=$osCompartment --admin-username=$vUserName --admin-password=$vPassword --subnet-id=$vSubnet --shape-name=$vShape --data-storage-size-in-gbs=$vStorageSize --display-name=$vDisplayName --availability-domain=$vAD --crash-recovery=disabled --backup-policy '{\"is-enabled\":\"false\"}' --source '{\"sourceType\": \"IMPORTURL\", \"sourceUrl\": \"$full_par_link\"}'" > /tmp/create_mds_$vDisplayName.sh
+	chmod u+x /tmp/create_mds_$vDisplayName.sh
+	/tmp/create_mds_$vDisplayName.sh &
+fi
+```
